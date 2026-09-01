@@ -47,8 +47,24 @@ save-and-restart flow each have per-OS implementations:
 
 Requires Node.js 18+.
 
-Add this to your `claude_desktop_config.json` (**this one time**, by
-hand — after that you can manage everything through the panel):
+**Automatic (recommended):**
+
+```bash
+npm install -g claude-mcp-config-manager
+```
+
+The install registers the app in `claude_desktop_config.json` by itself
+(idempotent; existing servers and settings are preserved, a timestamped
+backup is kept, and a config file with invalid JSON is never touched).
+Restart Claude Desktop and say **"Open the MCP config manager"**. On
+first use Claude Desktop asks once to allow the app's tools — that
+prompt is the host's own consent step and can't be pre-approved by an
+installer. Set `MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1` to install without
+touching the config.
+
+**Manual (alternative):**
+
+Add this to your `claude_desktop_config.json` yourself:
 
 **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Linux:** `~/.config/Claude/claude_desktop_config.json`

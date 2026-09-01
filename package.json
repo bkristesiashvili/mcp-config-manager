@@ -9,6 +9,7 @@
   "files": [
     "dist",
     "dist-ui",
+    "scripts/postinstall.mjs",
     "README.md"
   ],
   "engines": {
@@ -19,6 +20,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build": "npm run build:ui && npm run build:server",
     "prepare": "npm run build",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "node scripts/auto-version.mjs",
     "release": "node scripts/auto-version.mjs && npm publish",
     "start": "node dist/server.js"

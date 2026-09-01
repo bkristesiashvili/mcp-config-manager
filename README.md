@@ -27,6 +27,22 @@ MCP server entries without opening the file in a text editor.
 - Every save writes a `claude_desktop_config.json.bak.<timestamp>`
   next to the file first, so you can always roll back.
 
+## OS support
+
+Works on **macOS**, **Windows** (installer and Microsoft Store builds), and
+**Linux** (community Claude Desktop builds; `XDG_CONFIG_HOME` is honored
+when set). The config path, the running-status check, and the
+save-and-restart flow each have per-OS implementations:
+
+- **macOS** — graceful `osascript` quit, force-kill of leftovers, relaunch
+  via `open -a Claude`.
+- **Windows** — graceful window close then `Stop-Process`; relaunch via the
+  Start Menu app alias (covers Store and installer builds), falling back to
+  the exe that was running, then `%LOCALAPPDATA%\AnthropicClaude\claude.exe`.
+- **Linux** — remembers the running binary's path before killing so it can
+  relaunch exactly what ran; falls back to `claude-desktop` / `claude` on
+  PATH, then the desktop entry via `gtk-launch`.
+
 ## Install into Claude Desktop
 
 Requires Node.js 18+.

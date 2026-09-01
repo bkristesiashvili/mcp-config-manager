@@ -21,6 +21,18 @@ type Row = {
 
 type Status = { kind: "info" | "error" | "success"; msg: string } | null;
 
+// ─── Icons ──────────────────────────────────────────────────────────────
+// Inline SVGs, stroked with currentColor so button/danger/theme colors apply.
+const svg = (paths: string): string =>
+  `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const ICON_PENCIL = svg(
+  `<path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>`,
+);
+const ICON_CHECK = svg(`<path d="M20 6 9 17l-5-5"/>`);
+const ICON_TRASH = svg(
+  `<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/>`,
+);
+
 type State = {
   loading: boolean;
   configPath: string;
@@ -30,6 +42,7 @@ type State = {
   rows: Row[];
   selfScript: string; // this manager's own server script path (for hiding its row)
   editingKey: string | null; // row currently expanded in the inline editor
+  detailsKey: string | null; // row currently expanded in the read-only details view
   // Per-row process status, keyed by row.key. Missing = still checking.
   statuses: Record<string, boolean>;
   statusesChecked: boolean;
@@ -46,6 +59,7 @@ const state: State = {
   rows: [],
   selfScript: "",
   editingKey: null,
+  detailsKey: null,
   statuses: {},
   statusesChecked: false,
   dirty: false,
@@ -222,6 +236,8 @@ async function loadConfig(): Promise<void> {
     state.dirty = false;
     state.status = null;
     state.loading = false;
+    state.editingKey = null;
+    state.detailsKey = null;
     render();
     void refreshStatuses();
   } catch (err) {
@@ -243,6 +259,7 @@ async function refreshStatuses(): Promise<void> {
         key: row.key,
         command: converted.entry.command,
         args: converted.entry.args ?? [],
+        env: converted.entry.env ?? {},
       };
     })
     .filter((s): s is NonNullable<typeof s> => s !== null);
@@ -275,8 +292,8 @@ function statusBadge(row: Row): string {
   if (!fromRow(row)) return `<span class="muted">—</span>`;
   if (!state.statusesChecked) return `<span class="muted">checking…</span>`;
   return state.statuses[row.key]
-    ? `<span class="st running"><span class="dot"></span>Running</span>`
-    : `<span class="st stopped"><span class="dot"></span>Stopped</span>`;
+    ? `<span class="st running" title="Responded to an MCP handshake just now"><span class="dot"></span>Running</span>`
+    : `<span class="st stopped" title="Did not respond to an MCP handshake — check the command, args, and that any remote endpoint is reachable"><span class="dot"></span>Stopped</span>`;
 }
 
 async function saveConfig(): Promise<void> {
@@ -420,6 +437,17 @@ function render(): void {
     btn.addEventListener("click", () => removeRow(btn.dataset.key!));
   }
 
+  // Row click toggles the read-only details view; ignore clicks that
+  // land on the action buttons.
+  for (const tr of Array.from(
+    document.querySelectorAll<HTMLTableRowElement>("tr.server"),
+  )) {
+    tr.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest("button")) return;
+      toggleDetails(tr.dataset.key!);
+    });
+  }
+
   const editing = state.rows.find((r) => r.key === state.editingKey);
   if (editing) {
     const el = document.querySelector<HTMLElement>(
@@ -474,22 +502,28 @@ function renderRow(row: Row): string {
     .map((s) => s.trim())
     .filter((l) => l.indexOf("=") > 0).length;
   const editing = state.editingKey === row.key;
+  const details = !editing && state.detailsKey === row.key;
   const self = isSelfRow(row);
 
   const main = `
-    <tr class="server${editing ? " editing" : ""}">
+    <tr class="server${editing ? " editing" : ""}${details ? " expanded" : ""}" data-key="${row.key}"
+        title="${editing ? "" : details ? "Hide details" : "Show details"}">
       <td class="cell-name">${row.name ? esc(row.name) : `<span class="unnamed">(unnamed)</span>`}${self ? ` <span class="badge">this app</span>` : ""}</td>
       <td class="cell-status" data-status-for="${row.key}">${statusBadge(row)}</td>
       <td class="cell-cmd"><code>${esc(row.command) || `<span class="muted">—</span>`}</code></td>
       <td class="cell-args" title="${esc(args.join(" "))}">${esc(args.join(" ")) || `<span class="muted">—</span>`}</td>
       <td class="cell-env">${envCount ? `${envCount} var${envCount > 1 ? "s" : ""}` : `<span class="muted">—</span>`}</td>
       <td class="cell-actions">
-        <button class="edit small${editing ? " primary" : ""}" data-key="${row.key}">${editing ? "Done" : "Edit"}</button>
-        <button class="delete small danger" data-key="${row.key}" ${self ? "disabled" : ""}
-                title="${self ? "The config manager can't remove its own entry — the panel would disappear on next launch" : "Remove this server"}">Delete</button>
+        <button class="edit small icon${editing ? " primary" : ""}" data-key="${row.key}" ${self ? "disabled" : ""}
+                title="${self ? "The config manager can't edit its own entry — a broken command would make the panel unavailable on next launch" : editing ? "Done" : "Edit"}"
+                aria-label="${editing ? "Done" : "Edit"}">${editing ? ICON_CHECK : ICON_PENCIL}</button>
+        <button class="delete small icon danger" data-key="${row.key}" ${self ? "disabled" : ""}
+                title="${self ? "The config manager can't remove its own entry — the panel would disappear on next launch" : "Remove this server"}"
+                aria-label="Delete">${ICON_TRASH}</button>
       </td>
     </tr>
   `;
+  if (details) return main + renderDetails(row);
   if (!editing) return main;
 
   return (
@@ -520,8 +554,55 @@ function renderRow(row: Row): string {
   );
 }
 
+// Read-only expanded view of one server's full configuration.
+function renderDetails(row: Row): string {
+  const args = row.argsText
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const envLines = row.envText
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((l) => l.indexOf("=") > 0);
+
+  const converted = fromRow(row);
+  const json = converted
+    ? JSON.stringify({ [converted.name]: converted.entry }, null, 2)
+    : null;
+
+  return `
+    <tr class="details-row"><td colspan="6">
+      <div class="details">
+        <div class="detail">
+          <span class="detail-label">Command</span>
+          <pre>${esc(row.command) || `<span class="muted">—</span>`}</pre>
+        </div>
+        <div class="detail">
+          <span class="detail-label">Args${args.length ? ` (${args.length})` : ""}</span>
+          <pre>${args.length ? esc(args.join("\n")) : `<span class="muted">—</span>`}</pre>
+        </div>
+        <div class="detail">
+          <span class="detail-label">Env${envLines.length ? ` (${envLines.length})` : ""}</span>
+          <pre>${envLines.length ? esc(envLines.join("\n")) : `<span class="muted">—</span>`}</pre>
+        </div>
+        <div class="detail">
+          <span class="detail-label">Config entry</span>
+          <pre>${json ? esc(json) : `<span class="muted">incomplete — name and command required</span>`}</pre>
+        </div>
+      </div>
+    </td></tr>
+  `;
+}
+
+function toggleDetails(key: string): void {
+  if (state.editingKey === key) return; // editor already shows everything
+  state.detailsKey = state.detailsKey === key ? null : key;
+  render();
+}
+
 function toggleEdit(key: string): void {
   state.editingKey = state.editingKey === key ? null : key;
+  if (state.editingKey === key) state.detailsKey = null;
   render();
 }
 
@@ -566,6 +647,7 @@ function removeRow(key: string): void {
   if (!row || isSelfRow(row)) return;
   state.rows = state.rows.filter((r) => r.key !== key);
   if (state.editingKey === key) state.editingKey = null;
+  if (state.detailsKey === key) state.detailsKey = null;
   state.dirty = true;
   state.status = null;
   render();

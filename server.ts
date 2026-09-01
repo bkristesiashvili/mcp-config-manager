@@ -47,19 +47,20 @@ function claudeConfigPath(): string {
     // Microsoft Store installs virtualize AppData: Claude Desktop reads its
     // own copy under Packages\Claude_*\LocalCache\Roaming, so edits must land
     // there — the regular Roaming file is ignored once the copy exists.
-    const packagesDir = path.join(home, "AppData", "Local", "Packages");
+    const packagesDir =
+      process.env.LOCALAPPDATA != null
+        ? path.join(process.env.LOCALAPPDATA, "Packages")
+        : path.join(home, "AppData", "Local", "Packages");
     try {
       for (const entry of fsSync.readdirSync(packagesDir)) {
         if (!entry.startsWith("Claude_")) continue;
-        const candidate = path.join(
-          packagesDir,
-          entry,
-          "LocalCache",
-          "Roaming",
-          "Claude",
-          "claude_desktop_config.json",
-        );
-        if (fsSync.existsSync(candidate)) return candidate;
+        // Prefer the virtualized location as soon as the Store package's
+        // Claude dir exists, even before the first config file is written.
+        const dir = path.join(packagesDir, entry, "LocalCache", "Roaming", "Claude");
+        const candidate = path.join(dir, "claude_desktop_config.json");
+        if (fsSync.existsSync(candidate) || fsSync.existsSync(dir)) {
+          return candidate;
+        }
       }
     } catch {
       // Packages dir unreadable or missing — fall through to the regular path.
@@ -68,7 +69,11 @@ function claudeConfigPath(): string {
       process.env.APPDATA ?? path.join(home, "AppData", "Roaming");
     return path.join(appData, "Claude", "claude_desktop_config.json");
   }
-  return path.join(home, ".config", "Claude", "claude_desktop_config.json");
+  // Linux (community builds): honor XDG_CONFIG_HOME, default ~/.config.
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const configHome =
+    xdg && xdg.trim() ? xdg : path.join(home, ".config");
+  return path.join(configHome, "Claude", "claude_desktop_config.json");
 }
 
 type ServerEntry = {
@@ -138,40 +143,111 @@ async function writeConfigFile(
   return { path: p, backup };
 }
 
-// ─── Server process status ──────────────────────────────────────────────
-function listProcessCommandLines(): Promise<string[]> {
-  return new Promise((resolve) => {
-    const child =
-      process.platform === "win32"
-        ? spawn(
-            "powershell.exe",
-            [
-              "-NoProfile",
-              "-Command",
-              "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }",
-            ],
-            { stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
-          )
-        : spawn("ps", ["-axo", "command="], {
-            stdio: ["ignore", "pipe", "ignore"],
-          });
-    let out = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.on("close", () => resolve(out.split("\n").filter(Boolean)));
-    child.on("error", () => resolve([]));
-    setTimeout(() => child.kill(), 8000).unref();
-  });
-}
+// ─── Server health probe ────────────────────────────────────────────────
+// A live process is NOT proof the server works: wrappers like mcp-remote
+// keep running (and retrying) even when their endpoint is dead. The only
+// honest health signal for a stdio server is an actual MCP handshake, so
+// each check spawns the configured command, sends `initialize`, and
+// requires a valid JSON-RPC response within the timeout. The probe's
+// whole process tree is killed afterwards.
+const PROBE_TIMEOUT_MS = 8000;
 
-// The most distinctive token of a server entry — usually the package
-// name or script path — so we can spot its process in the list even
-// when npx/node wrappers reshape the command line.
-function statusNeedle(command: string, args: string[] | undefined): string {
-  const candidates = (args ?? []).filter(
-    (a) => a.length >= 5 && !a.startsWith("-"),
-  );
-  candidates.push(command);
-  return candidates.sort((a, b) => b.length - a.length)[0] ?? command;
+function probeServer(
+  command: string,
+  args: string[],
+  env: Record<string, string>,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, args, {
+        stdio: ["pipe", "pipe", "ignore"],
+        env: { ...process.env, ...env },
+        // POSIX: own process group so the timeout can kill npx AND the
+        // node child it spawned. Windows: shell resolves npx.cmd etc.
+        detached: process.platform !== "win32",
+        shell: process.platform === "win32",
+        windowsHide: true,
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    const killTree = () => {
+      try {
+        if (child.pid == null) return;
+        if (process.platform === "win32") {
+          spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+          }).on("error", () => {});
+        } else {
+          try {
+            process.kill(-child.pid, "SIGKILL"); // whole process group
+          } catch {
+            child.kill("SIGKILL");
+          }
+        }
+      } catch {
+        // best effort
+      }
+    };
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      killTree();
+      resolve(ok);
+    };
+
+    child.on("error", () => done(false));
+    child.on("exit", () => done(false)); // died before answering
+
+    let buf = "";
+    child.stdout!.on("data", (d) => {
+      buf += String(d);
+      if (buf.length > 1_000_000) return done(false);
+      for (const line of buf.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line) as {
+            id?: unknown;
+            result?: unknown;
+            error?: unknown;
+          };
+          if (msg.id !== 1) continue;
+          done(msg.result != null && msg.error == null);
+          return;
+        } catch {
+          // partial line or non-JSON noise — keep buffering
+        }
+      }
+    });
+
+    child.stdin!.on("error", () => {});
+    try {
+      child.stdin!.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "mcp-config-manager-probe", version: "1.0.0" },
+          },
+        }) + "\n",
+      );
+    } catch {
+      done(false);
+      return;
+    }
+
+    timer = setTimeout(() => done(false), PROBE_TIMEOUT_MS);
+  });
 }
 
 // ─── Restart Claude Desktop ─────────────────────────────────────────────
@@ -181,18 +257,25 @@ function statusNeedle(command: string, args: string[] | undefined): string {
 // time to reach the panel before the app goes down.
 function restartClaudeDetached(): { method: string } {
   if (process.platform === "win32") {
+    // NOTE: each array element must be a complete PowerShell statement —
+    // they are joined with ";", and `}; else {` is a parse error in PS.
     const ps = [
+      // Remember how the app can be relaunched BEFORE killing it:
+      // the Start Menu alias covers both Store and installer builds,
+      // and the running exe's path is a fallback for portable installs.
+      "$app = (Get-StartApps -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Claude' } | Select-Object -First 1).AppID",
+      "$exe = (Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1).Path",
       "Start-Sleep -Seconds 2",
       // Graceful close first, then force-kill whatever's left.
       "Get-Process claude -ErrorAction SilentlyContinue | ForEach-Object { $null = $_.CloseMainWindow() }",
       "Start-Sleep -Seconds 3",
       "Stop-Process -Name claude -Force -ErrorAction SilentlyContinue",
       "Start-Sleep -Seconds 1",
-      // Store install: relaunch via the shell app alias; installer
-      // build: via the exe under %LOCALAPPDATA%.
-      "$app = (Get-StartApps | Where-Object { $_.Name -eq 'Claude' } | Select-Object -First 1).AppID",
-      'if ($app) { explorer.exe "shell:AppsFolder\\$app" }',
-      "else { $exe = Join-Path $env:LOCALAPPDATA 'AnthropicClaude\\claude.exe'; if (Test-Path $exe) { Start-Process $exe } }",
+      "$done = $false",
+      'if ($app) { explorer.exe "shell:AppsFolder\\$app"; $done = $true }',
+      // Store exes under WindowsApps can't be started directly — skip those.
+      "if (-not $done -and $exe -and (Test-Path $exe) -and $exe -notlike '*WindowsApps*') { Start-Process $exe; $done = $true }",
+      "if (-not $done) { $fallback = Join-Path $env:LOCALAPPDATA 'AnthropicClaude\\claude.exe'; if (Test-Path $fallback) { Start-Process $fallback } }",
     ].join("; ");
     const child = spawn(
       "powershell.exe",
@@ -204,7 +287,12 @@ function restartClaudeDetached(): { method: string } {
   }
   if (process.platform === "darwin") {
     const sh =
-      "sleep 2; osascript -e 'tell application \"Claude\" to quit' >/dev/null 2>&1; sleep 3; open -a Claude";
+      "sleep 2; " +
+      "osascript -e 'tell application \"Claude\" to quit' >/dev/null 2>&1; " +
+      "sleep 3; " +
+      "pkill -9 -x Claude >/dev/null 2>&1; " + // force-kill leftovers
+      "sleep 1; " +
+      "open -a Claude";
     const child = spawn("/bin/sh", ["-c", sh], {
       detached: true,
       stdio: "ignore",
@@ -212,9 +300,29 @@ function restartClaudeDetached(): { method: string } {
     child.unref();
     return { method: "sh" };
   }
-  const sh =
-    "sleep 2; pkill -x claude-desktop >/dev/null 2>&1 || pkill -x claude >/dev/null 2>&1; sleep 3; " +
-    "(claude-desktop >/dev/null 2>&1 &) || (claude >/dev/null 2>&1 &)";
+  // Linux (community builds go by various names). Remember the running
+  // binary's path before killing so we can relaunch exactly what ran;
+  // fall back to well-known command names and the desktop entry.
+  const sh = [
+    "sleep 2",
+    'PID=$(pgrep -x claude-desktop 2>/dev/null | head -n1)',
+    '[ -z "$PID" ] && PID=$(pgrep -x claude 2>/dev/null | head -n1)',
+    'EXE=""',
+    '[ -n "$PID" ] && EXE=$(tr "\\0" "\\n" < /proc/$PID/cmdline 2>/dev/null | head -n1)',
+    // A bare interpreter can't relaunch the app on its own — ignore it.
+    'case "$(basename "$EXE" 2>/dev/null)" in electron*|node) EXE="" ;; esac',
+    "pkill -x claude-desktop >/dev/null 2>&1",
+    "pkill -x claude >/dev/null 2>&1",
+    "sleep 3",
+    "pkill -9 -x claude-desktop >/dev/null 2>&1",
+    "pkill -9 -x claude >/dev/null 2>&1",
+    "sleep 1",
+    'if [ -n "$EXE" ] && [ -x "$EXE" ]; then ("$EXE" >/dev/null 2>&1 &)',
+    "elif command -v claude-desktop >/dev/null 2>&1; then (claude-desktop >/dev/null 2>&1 &)",
+    "elif command -v claude >/dev/null 2>&1; then (claude >/dev/null 2>&1 &)",
+    "elif command -v gtk-launch >/dev/null 2>&1; then (gtk-launch claude-desktop >/dev/null 2>&1 || gtk-launch claude >/dev/null 2>&1 &)",
+    "fi",
+  ].join("\n");
   const child = spawn("/bin/sh", ["-c", sh], {
     detached: true,
     stdio: "ignore",
@@ -315,37 +423,35 @@ registerAppTool(
   },
 );
 
-// App-only: check which configured servers have a live process.
+// App-only: probe which configured servers actually work (respond to an
+// MCP initialize handshake), not merely have a process alive.
 registerAppTool(
   server,
   "check-server-status",
   {
     title: "Check MCP server status",
     description:
-      "Check which configured MCP servers currently have a running process (UI use only).",
+      "Probe each configured MCP server with an MCP initialize handshake to see which ones actually respond (UI use only).",
     inputSchema: {
       servers: z.array(
         z.object({
           key: z.string(),
           command: z.string(),
           args: z.array(z.string()).optional(),
+          env: z.record(z.string()).optional(),
         }),
       ),
     },
     _meta: { ui: { resourceUri: RESOURCE_URI, visibility: ["app"] } },
   },
   async ({ servers }) => {
-    const lines = (await listProcessCommandLines()).map((l) =>
-      l.toLowerCase(),
+    const results = await Promise.all(
+      servers.map((s) => probeServer(s.command, s.args ?? [], s.env ?? {})),
     );
     const statuses: Record<string, boolean> = {};
-    for (const s of servers) {
-      const needle = statusNeedle(s.command, s.args).toLowerCase();
-      statuses[s.key] =
-        needle.length >= 3 && lines.some((l) => l.includes(needle));
-    }
+    servers.forEach((s, i) => (statuses[s.key] = results[i]!));
     return {
-      content: [{ type: "text", text: "Checked MCP server process status." }],
+      content: [{ type: "text", text: "Probed MCP server health." }],
       structuredContent: { statuses },
     };
   },
@@ -382,12 +488,20 @@ registerAppResource(
   server,
   "MCP Config Manager UI",
   RESOURCE_URI,
-  { description: "UI panel for managing claude_desktop_config.json" },
+  {
+    description: "UI panel for managing claude_desktop_config.json",
+    _meta: { ui: { prefersBorder: false } },
+  },
   async () => {
     const html = await fs.readFile(UI_HTML_PATH, "utf-8");
     return {
       contents: [
-        { uri: RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: html },
+        {
+          uri: RESOURCE_URI,
+          mimeType: RESOURCE_MIME_TYPE,
+          text: html,
+          _meta: { ui: { prefersBorder: false } },
+        },
       ],
     };
   },

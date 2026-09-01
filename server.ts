@@ -277,7 +277,12 @@ function restartClaudeDetached(): { method: string } {
       "$exe = (& $claudeProcs | Where-Object { $_.Path -and $_.Name -like 'claude*' } | Select-Object -First 1).Path",
       "Add-Content -Path $log -Value ('routes: update=' + (Test-Path $update) + ' app=' + $app + ' exe=' + $exe) -ErrorAction SilentlyContinue",
       "Start-Sleep -Seconds 2",
-      // Tray apps ignore window close as a quit signal — force-kill.
+      // Visible window: attempt a graceful close first. Tray-only (no
+      // main window — close would just be ignored): force-kill straight
+      // away. Leftovers are force-killed in both cases.
+      "$visible = (& $claudeProcs | Where-Object { $_.MainWindowHandle -ne 0 } | Measure-Object).Count -gt 0",
+      "if ($visible) { & $claudeProcs | ForEach-Object { $null = $_.CloseMainWindow() }; Start-Sleep -Seconds 3; Add-Content -Path $log -Value 'graceful close attempted' -ErrorAction SilentlyContinue }",
+      "if (-not $visible) { Add-Content -Path $log -Value 'tray-only: forcing kill' -ErrorAction SilentlyContinue }",
       "& $claudeProcs | Stop-Process -Force -ErrorAction SilentlyContinue",
       // Wait for the processes to actually die (up to 10s) so the new
       // instance doesn't hit the still-running single-instance lock.

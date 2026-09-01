@@ -257,25 +257,40 @@ function probeServer(
 // time to reach the panel before the app goes down.
 function restartClaudeDetached(): { method: string } {
   if (process.platform === "win32") {
+    // Claude Desktop on Windows lives in the system tray: closing the
+    // main window only hides it, so the app must be force-killed, and
+    // the relaunch must wait until every process is really gone or the
+    // new instance loses the Electron single-instance race and exits.
     // NOTE: each array element must be a complete PowerShell statement —
     // they are joined with ";", and `}; else {` is a parse error in PS.
     const ps = [
-      // Remember how the app can be relaunched BEFORE killing it:
-      // the Start Menu alias covers both Store and installer builds,
-      // and the running exe's path is a fallback for portable installs.
+      // Progress log for diagnosing restart problems in the field.
+      "$log = Join-Path $env:TEMP 'mcp-config-manager-restart.log'",
+      "Set-Content -Path $log -Value ('restart begin ' + (Get-Date)) -ErrorAction SilentlyContinue",
+      // Remember every relaunch route BEFORE killing anything:
+      // Squirrel launcher (installer builds keep claude.exe inside a
+      // versioned app-* subfolder, so Update.exe is the stable entry),
+      // Start Menu alias (Store builds), and the running exe's path.
+      "$claudeProcs = { Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'claude*' -or ($_.Path -and $_.Path -like '*AnthropicClaude*') } }",
+      "$update = Join-Path $env:LOCALAPPDATA 'AnthropicClaude\\Update.exe'",
       "$app = (Get-StartApps -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Claude' } | Select-Object -First 1).AppID",
-      "$exe = (Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1).Path",
+      "$exe = (& $claudeProcs | Where-Object { $_.Path -and $_.Name -like 'claude*' } | Select-Object -First 1).Path",
+      "Add-Content -Path $log -Value ('routes: update=' + (Test-Path $update) + ' app=' + $app + ' exe=' + $exe) -ErrorAction SilentlyContinue",
       "Start-Sleep -Seconds 2",
-      // Graceful close first, then force-kill whatever's left.
-      "Get-Process claude -ErrorAction SilentlyContinue | ForEach-Object { $null = $_.CloseMainWindow() }",
-      "Start-Sleep -Seconds 3",
-      "Stop-Process -Name claude -Force -ErrorAction SilentlyContinue",
+      // Tray apps ignore window close as a quit signal — force-kill.
+      "& $claudeProcs | Stop-Process -Force -ErrorAction SilentlyContinue",
+      // Wait for the processes to actually die (up to 10s) so the new
+      // instance doesn't hit the still-running single-instance lock.
+      "$i = 0",
+      "while ((& $claudeProcs) -and $i -lt 20) { Start-Sleep -Milliseconds 500; $i++ }",
       "Start-Sleep -Seconds 1",
       "$done = $false",
-      'if ($app) { explorer.exe "shell:AppsFolder\\$app"; $done = $true }',
+      "if (Test-Path $update) { Start-Process $update -ArgumentList '--processStart','claude.exe'; $done = $true; Add-Content -Path $log -Value 'relaunch: Update.exe' -ErrorAction SilentlyContinue }",
+      'if (-not $done -and $app) { explorer.exe "shell:AppsFolder\\$app"; $done = $true; Add-Content -Path $log -Value \'relaunch: StartApps alias\' -ErrorAction SilentlyContinue }',
       // Store exes under WindowsApps can't be started directly — skip those.
-      "if (-not $done -and $exe -and (Test-Path $exe) -and $exe -notlike '*WindowsApps*') { Start-Process $exe; $done = $true }",
-      "if (-not $done) { $fallback = Join-Path $env:LOCALAPPDATA 'AnthropicClaude\\claude.exe'; if (Test-Path $fallback) { Start-Process $fallback } }",
+      "if (-not $done -and $exe -and (Test-Path $exe) -and $exe -notlike '*WindowsApps*') { Start-Process $exe; $done = $true; Add-Content -Path $log -Value 'relaunch: running exe path' -ErrorAction SilentlyContinue }",
+      "if (-not $done) { $found = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'AnthropicClaude') -Recurse -Filter 'claude.exe' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($found) { Start-Process $found.FullName; $done = $true; Add-Content -Path $log -Value 'relaunch: discovered exe' -ErrorAction SilentlyContinue } }",
+      "Add-Content -Path $log -Value ('restart done=' + $done) -ErrorAction SilentlyContinue",
     ].join("; ");
     const child = spawn(
       "powershell.exe",

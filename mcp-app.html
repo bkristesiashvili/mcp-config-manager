@@ -1,0 +1,369 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>MCP Config Manager</title>
+    <style>
+      /* Every color is driven by the host's theme variables (Claude
+         Desktop injects these), with light-dark() fallbacks so the
+         panel still adapts to light/dark when a variable is missing. */
+      :root {
+        --c-text: var(--text-primary, light-dark(#1a1a1a, #ececec));
+        --c-text-dim: var(--text-secondary, light-dark(#6b6b6b, #a0a0a0));
+        --c-border: var(
+          --border-color,
+          light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.14))
+        );
+        --c-surface: var(
+          --surface-primary,
+          light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.04))
+        );
+        --c-surface-2: var(
+          --surface-secondary,
+          light-dark(rgba(0, 0, 0, 0.045), rgba(255, 255, 255, 0.07))
+        );
+        --c-hover: var(
+          --surface-hover,
+          light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.1))
+        );
+        --c-accent: var(--accent, light-dark(#2f6feb, #6ea8ff));
+        --c-danger: light-dark(#c23434, #ff8a8a);
+        --c-ok: light-dark(#1f7a4a, #7be2a8);
+      }
+      :root {
+        color-scheme: light dark;
+        font-family: var(
+          --font-family,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif
+        );
+        color: var(--c-text);
+        font-size: 13px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        background: transparent;
+      }
+      .loading {
+        color: var(--c-text-dim);
+        padding: 24px;
+        text-align: center;
+      }
+      .app {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      header {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .path {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .path .label {
+        text-transform: uppercase;
+        font-size: 10.5px;
+        letter-spacing: 0.06em;
+        color: var(--c-text-dim);
+      }
+      .path .value {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+      }
+      .badge {
+        font-size: 10px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: var(--c-surface-2);
+        color: var(--c-text-dim);
+      }
+
+      .servers {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      /* Toolbar */
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .toolbar .title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .count {
+        display: inline-block;
+        min-width: 18px;
+        text-align: center;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: var(--c-surface-2);
+        color: var(--c-text-dim);
+      }
+      .spacer {
+        flex: 1;
+      }
+
+      /* Server table */
+      .table-wrap {
+        border: 1px solid var(--c-border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--c-surface);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      thead th {
+        text-align: left;
+        font-size: 10.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--c-text-dim);
+        padding: 8px 12px;
+        background: var(--c-surface-2);
+        border-bottom: 1px solid var(--c-border);
+      }
+      tbody td {
+        padding: 8px 12px;
+        border-top: 1px solid var(--c-border);
+        vertical-align: middle;
+      }
+      tbody tr:first-child td {
+        border-top: none;
+      }
+      tr.server:hover td {
+        background: var(--c-hover);
+      }
+      tr.server.editing td {
+        background: var(--c-surface-2);
+      }
+      .cell-name {
+        font-weight: 600;
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .cell-cmd code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+      }
+      .cell-args {
+        max-width: 240px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11.5px;
+        color: var(--c-text-dim);
+      }
+      .cell-env {
+        white-space: nowrap;
+        color: var(--c-text-dim);
+      }
+      .cell-actions {
+        white-space: nowrap;
+        text-align: right;
+        width: 1%;
+      }
+      .cell-status {
+        white-space: nowrap;
+      }
+      .st {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .st .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: currentColor;
+        flex: none;
+      }
+      .st.running {
+        color: var(--c-ok);
+      }
+      .st.stopped {
+        color: var(--c-text-dim);
+      }
+      .muted {
+        color: var(--c-text-dim);
+        opacity: 0.7;
+      }
+      .unnamed {
+        color: var(--c-text-dim);
+        font-style: italic;
+        font-weight: 400;
+      }
+      .empty {
+        color: var(--c-text-dim);
+        text-align: center;
+        padding: 24px;
+        border: 1px dashed var(--c-border);
+        border-radius: 10px;
+      }
+
+      /* Inline editor */
+      tr.editor-row > td {
+        padding: 0;
+        border-top: none;
+      }
+      .editor {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px 14px 14px;
+        background: var(--c-surface-2);
+        border-top: 1px dashed var(--c-border);
+      }
+      .editor-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--c-text-dim);
+      }
+
+      /* Controls */
+      input,
+      textarea,
+      select {
+        font: inherit;
+        color: var(--c-text);
+        background: var(--c-surface);
+        border: 1px solid var(--c-border);
+        border-radius: 6px;
+        padding: 6px 8px;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      input:focus,
+      textarea:focus,
+      select:focus {
+        outline: 2px solid var(--c-accent);
+        outline-offset: -1px;
+      }
+      /* Selects need solid colors — semi-transparent backgrounds make
+         the closed control and the native option list unreadable,
+         especially in dark theme. */
+      select {
+        background: light-dark(#ffffff, #2b2b2b);
+        color: light-dark(#1a1a1a, #ececec);
+      }
+      select option {
+        background: light-dark(#ffffff, #2b2b2b);
+        color: light-dark(#1a1a1a, #ececec);
+      }
+      textarea {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        resize: vertical;
+        min-height: 44px;
+      }
+      textarea.args {
+        min-height: 120px;
+      }
+      button {
+        font: inherit;
+        color: var(--c-text);
+        cursor: pointer;
+        padding: 7px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--c-border);
+        background: var(--c-surface-2);
+      }
+      button:hover:not(:disabled) {
+        background: var(--c-hover);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      button.primary {
+        background: var(--c-accent);
+        color: light-dark(#fff, #0e1420);
+        border-color: transparent;
+      }
+      button.primary:hover:not(:disabled) {
+        filter: brightness(1.08);
+        background: var(--c-accent);
+      }
+      button.small {
+        padding: 4px 10px;
+        font-size: 12px;
+      }
+      button.danger {
+        color: var(--c-danger);
+      }
+      button.danger:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--c-danger) 14%, transparent);
+        border-color: color-mix(in srgb, var(--c-danger) 40%, transparent);
+      }
+
+      footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        border-top: 1px solid var(--c-border);
+        margin-top: 4px;
+        padding-top: 12px;
+      }
+      .alert {
+        padding: 8px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .alert.error {
+        background: color-mix(in srgb, var(--c-danger) 12%, transparent);
+        color: var(--c-danger);
+      }
+      .alert.success {
+        background: color-mix(in srgb, var(--c-ok) 14%, transparent);
+        color: var(--c-ok);
+      }
+      .alert.info {
+        background: var(--c-surface-2);
+        color: var(--c-text-dim);
+      }
+    </style>
+    <script type="module" src="/mcp-app.ts"></script>
+  </head>
+  <body>
+    <div id="root"><div class="loading">Loading MCP config…</div></div>
+  </body>
+</html>

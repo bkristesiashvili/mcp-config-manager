@@ -1,0 +1,37 @@
+{
+  "name": "claude-mcp-config-manager",
+  "version": "1.0.2",
+  "description": "MCP App for Claude Desktop — manage MCP server entries in claude_desktop_config.json from an interactive panel inside the chat",
+  "type": "module",
+  "bin": {
+    "claude-mcp-config-manager": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "dist-ui",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build:ui": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build": "npm run build:ui && npm run build:server",
+    "prepare": "npm run build",
+    "prepublishOnly": "node scripts/auto-version.mjs",
+    "release": "node scripts/auto-version.mjs && npm publish",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.1.2",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vite": "^8.2.2",
+    "vite-plugin-singlefile": "^2.0.3"
+  }
+}

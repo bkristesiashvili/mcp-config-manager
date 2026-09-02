@@ -1,6 +1,6 @@
 {
   "name": "claude-mcp-config-manager",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "MCP App for Claude Desktop — manage MCP server entries in claude_desktop_config.json from an interactive panel inside the chat",
   "type": "module",
   "bin": {

@@ -1,6 +1,6 @@
 {
   "name": "claude-mcp-config-manager",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "MCP App for Claude Desktop — manage MCP server entries in claude_desktop_config.json from an interactive panel inside the chat",
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "dist",
     "dist-ui",
     "scripts/postinstall.mjs",
+    "scripts/uninstall.mjs",
     "README.md"
   ],
   "engines": {
@@ -21,6 +22,7 @@
     "build": "npm run build:ui && npm run build:server",
     "prepare": "npm run build",
     "postinstall": "node scripts/postinstall.mjs",
+    "preuninstall": "node scripts/uninstall.mjs",
     "prepublishOnly": "node scripts/auto-version.mjs",
     "release": "node scripts/auto-version.mjs && npm publish",
     "start": "node dist/server.js"

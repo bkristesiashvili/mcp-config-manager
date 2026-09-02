@@ -50,17 +50,27 @@ Requires Node.js 18+.
 **Automatic (recommended):**
 
 ```bash
-npm install -g claude-mcp-config-manager
+npx -y claude-mcp-config-manager install
 ```
 
-The install registers the app in `claude_desktop_config.json` by itself
-(idempotent; existing servers and settings are preserved, a timestamped
-backup is kept, and a config file with invalid JSON is never touched).
-Restart Claude Desktop and say **"Open the MCP config manager"**. On
-first use Claude Desktop asks once to allow the app's tools — that
-prompt is the host's own consent step and can't be pre-approved by an
-installer. Set `MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1` to install without
-touching the config.
+or, if you prefer a global install, `npm install -g claude-mcp-config-manager`
+— its postinstall hook registers the app the same way.
+
+Either way the app lands in `claude_desktop_config.json` as an `npx -y`
+entry (idempotent; existing servers and settings are preserved, a
+timestamped backup is kept, and a config file with invalid JSON is never
+touched). Restart Claude Desktop and say **"Open the MCP config
+manager"**. On first use Claude Desktop asks once to allow the app's
+tools — that prompt is the host's own consent step and can't be
+pre-approved by an installer. `install` can be run again at any time,
+e.g. to re-add the app after an `uninstall`. Set
+`MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1` to `npm install` without touching
+the config.
+
+A bare `npx -y claude-mcp-config-manager` (no `install`) is not a
+reliable way to register: npx runs the postinstall hook only the first
+time it fills its cache, shows none of its output, and on every later run
+just starts the server and waits on stdin.
 
 **Manual (alternative):**
 
@@ -84,6 +94,32 @@ Add this to your `claude_desktop_config.json` yourself:
 
 (On Windows, use `"command": "npx.cmd"` if plain `npx` fails to spawn.)
 
+## Uninstall
+
+```bash
+npx -y claude-mcp-config-manager uninstall
+npm uninstall -g claude-mcp-config-manager
+```
+
+The first command removes the app's entry from
+`claude_desktop_config.json` (every other server and setting is kept, a
+timestamped backup is written first, and a file with invalid JSON is
+never touched); restart Claude Desktop afterwards. The second removes
+the package (skip it if you never installed globally). The order doesn't
+matter — `npx -y` fetches the package again if it's already gone, which
+is also why removing the config entry is the step that actually matters:
+the `npx -y` entry keeps working without the global install. To put the
+app back later, run `npx -y claude-mcp-config-manager install`.
+
+`npm uninstall` alone can't do this. npm 7 and later don't run a
+package's `preuninstall`/`postuninstall` scripts at all (by design —
+see "A Note on a lack of npm uninstall scripts" in npm's docs). On npm 6
+the package's `preuninstall` hook runs the same cleanup automatically;
+`MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1` skips it there too.
+
+Installed from source? `node dist/server.js uninstall` in the checkout
+also removes entries that point at that checkout's `dist/server.js`.
+
 ## Build from source
 
 ```bash
@@ -96,7 +132,7 @@ Produces:
 - `dist-ui/mcp-app.html` — the bundled single-file UI
 - `dist/server.js` — the compiled MCP server (stdio transport)
 
-Point your config at it with `"command": "node", "args": ["/absolute/path/to/dist/server.js"]`, or run `npm install -g .` and use the `claude-mcp-config-manager` command.
+Point your config at it with `"command": "node", "args": ["/absolute/path/to/dist/server.js"]` — `node dist/server.js install` writes exactly that entry for you — or run `npm install -g .` and use the `claude-mcp-config-manager` command.
 
 Restart Claude Desktop. Then, in a chat:
 
@@ -117,8 +153,9 @@ chat reopens when the app comes back; unsaved panel edits do not.
 
 The panel marks its own entry with a **this app** badge and disables
 its Delete button — removing it and saving would make the panel
-unavailable on the next launch. If you really want it gone, edit the
-config file by hand; timestamped backups cover accidents either way.
+unavailable on the next launch. If you really want it gone, run
+`claude-mcp-config-manager uninstall` (see [Uninstall](#uninstall));
+timestamped backups cover accidents either way.
 
 ## Files
 
@@ -130,3 +167,5 @@ config file by hand; timestamped backups cover accidents either way.
 | `vite.config.ts`        | Bundles the UI into one HTML file with inlined JS/CSS           |
 | `tsconfig.json`         | Vite/UI TS config                                               |
 | `tsconfig.server.json`  | Server TS config (compiles `server.ts` → `dist/server.js`)      |
+| `scripts/postinstall.mjs` | Registers the app in `claude_desktop_config.json` (`install` subcommand; npm `postinstall`) |
+| `scripts/uninstall.mjs` | Removes it again (`uninstall` subcommand; npm 6 `preuninstall`) |

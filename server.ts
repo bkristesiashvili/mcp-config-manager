@@ -23,13 +23,48 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/server.js at runtime  ->  ../dist-ui/mcp-app.html
 const UI_HTML_PATH = path.resolve(__dirname, "..", "dist-ui", "mcp-app.html");
 const RESOURCE_URI = "ui://mcp-config-manager/mcp-app.html";
+
+// ─── CLI subcommands ────────────────────────────────────────────────────
+// `claude-mcp-config-manager install` registers this app in
+// claude_desktop_config.json and `uninstall` removes it again. Both have
+// to be explicit commands: npm 7+ never runs a package's uninstall
+// lifecycle scripts, and npx runs postinstall only the first time it
+// fills its cache (with the output hidden), so a bare `npx -y` run can't
+// be relied on to register. With no arguments we are the MCP server.
+const SUBCOMMANDS: Record<string, string> = {
+  install: "postinstall.mjs",
+  register: "postinstall.mjs",
+  uninstall: "uninstall.mjs",
+  unregister: "uninstall.mjs",
+};
+const subcommand = process.argv[2];
+if (subcommand !== undefined && Object.hasOwn(SUBCOMMANDS, subcommand)) {
+  const script = path.resolve(__dirname, "..", "scripts", SUBCOMMANDS[subcommand]);
+  const { status, error } = spawnSync(process.execPath, [script], {
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (error) console.error(`[mcp-config-manager] ${error.message}`);
+  process.exit(status ?? 1);
+}
+if (subcommand === "--help" || subcommand === "-h" || subcommand === "help") {
+  console.error(
+    [
+      "Usage:",
+      "  claude-mcp-config-manager            start the MCP server (stdio)",
+      "  claude-mcp-config-manager install    add this app to claude_desktop_config.json",
+      "  claude-mcp-config-manager uninstall  remove it again",
+    ].join("\n"),
+  );
+  process.exit(0);
+}
 
 // ─── Config file helpers ────────────────────────────────────────────────
 function claudeConfigPath(): string {

@@ -1,18 +1,26 @@
 #!/usr/bin/env node
 /**
- * postinstall: auto-register this app in Claude Desktop's
- * claude_desktop_config.json so `npm install -g claude-mcp-config-manager`
- * (or the first `npx -y claude-mcp-config-manager` run) is all it takes.
+ * Register this app in Claude Desktop's claude_desktop_config.json.
+ *
+ * Two ways to get here:
+ *   - As npm's `postinstall` hook, so `npm install -g claude-mcp-config-manager`
+ *     is all it takes. npx runs the hook too, but only the first time it
+ *     fills its cache — and it hides the output — so for npx the explicit
+ *     form is the reliable one:
+ *   - `claude-mcp-config-manager install` (also works as
+ *     `npx -y claude-mcp-config-manager install`), which registers on every
+ *     run and re-adds the app after an `uninstall`.
  *
  * Safety rules:
- *   - Runs only from a real install (node_modules / npx cache), never
- *     from a source checkout.
  *   - Never touches a config file with invalid JSON.
- *   - Idempotent: if any entry already runs this package, it is left
- *     exactly as it is.
+ *   - Idempotent: if an entry already runs this app (same test as the
+ *     panel's "this app" badge), it is left exactly as it is.
  *   - Preserves all other config keys, keeps a timestamped backup, and
  *     writes atomically — same guarantees as the panel's own Save.
- *   - Opt out with MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1.
+ *   - Hook mode never fails the npm install, honors
+ *     MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1, and skips source checkouts.
+ *     Explicit mode always tries and exits non-zero on failure; from a
+ *     source checkout it registers that checkout's dist/server.js.
  *
  * Note: Claude Desktop's tool permission prompt is the host's own
  * user-consent step and cannot (and should not) be pre-granted here.
@@ -23,6 +31,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 const PKG_NAME = "claude-mcp-config-manager";
+const HOOK_MODE = process.env.npm_lifecycle_event === "postinstall";
 const log = (msg) => console.log(`[${PKG_NAME}] ${msg}`);
 
 function claudeConfigPath() {
@@ -59,18 +68,33 @@ function claudeConfigPath() {
   return path.join(configHome, "Claude", "claude_desktop_config.json");
 }
 
-function main() {
-  if (process.env.MCP_CONFIG_MANAGER_NO_AUTOCONFIG === "1") {
-    log("auto-configure disabled (MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1)");
-    return;
-  }
+// Same test the panel uses for its "this app" badge (isSelf in mcp-app.ts).
+function isThisApp(entry, selfScript) {
+  const norm = (s) => String(s).toLowerCase().replace(/\\/g, "/");
+  const args = Array.isArray(entry?.args) ? entry.args : [];
+  const hay = norm([entry?.command ?? "", ...args].join(" "));
+  return hay.includes(PKG_NAME) || hay.includes(norm(selfScript));
+}
 
-  // Only auto-configure from a real install, not the source checkout.
+function main() {
   const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const parts = pkgDir.split(path.sep);
-  if (!parts.includes("node_modules") && !parts.includes("_npx")) {
-    log("source checkout — skipping auto-configure");
-    return;
+  const installed = parts.includes("node_modules") || parts.includes("_npx");
+  const selfScript = path.join(pkgDir, "dist", "server.js");
+
+  if (HOOK_MODE) {
+    if (process.env.MCP_CONFIG_MANAGER_NO_AUTOCONFIG === "1") {
+      log("auto-configure disabled (MCP_CONFIG_MANAGER_NO_AUTOCONFIG=1)");
+      return 0;
+    }
+    // Only auto-configure from a real install, not the source checkout.
+    if (!installed) {
+      log("source checkout — skipping auto-configure");
+      return 0;
+    }
+  } else if (!installed && !fs.existsSync(selfScript)) {
+    log(`${selfScript} not found — run \`npm run build\` first`);
+    return 1;
   }
 
   const configPath = claudeConfigPath();
@@ -85,7 +109,7 @@ function main() {
       } catch {
         log(`existing config at ${configPath} has invalid JSON — not touching it.`);
         log("Fix the file, then add the entry by hand (see README).");
-        return;
+        return 1;
       }
     }
   }
@@ -94,12 +118,12 @@ function main() {
   }
 
   // Already registered under any name? Leave the user's entry alone.
-  const already = Object.values(doc.mcpServers).some((entry) =>
-    JSON.stringify(entry ?? {}).includes(PKG_NAME),
+  const already = Object.keys(doc.mcpServers).find((name) =>
+    isThisApp(doc.mcpServers[name], selfScript),
   );
   if (already) {
-    log("already registered in Claude Desktop's config — nothing to do");
-    return;
+    log(`already registered as "${already}" in ${configPath} — nothing to do`);
+    return 0;
   }
 
   let name = "config-manager";
@@ -107,10 +131,15 @@ function main() {
   while (Object.prototype.hasOwnProperty.call(doc.mcpServers, name)) {
     name = `config-manager-${i++}`;
   }
-  doc.mcpServers[name] = {
-    command: process.platform === "win32" ? "npx.cmd" : "npx",
-    args: ["-y", PKG_NAME],
-  };
+  // An installed copy (global or npx cache) is run through npx so the
+  // entry keeps working however the package was fetched; a source
+  // checkout is run directly.
+  doc.mcpServers[name] = installed
+    ? {
+        command: process.platform === "win32" ? "npx.cmd" : "npx",
+        args: ["-y", PKG_NAME],
+      }
+    : { command: "node", args: [selfScript] };
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   if (existed) {
@@ -124,11 +153,15 @@ function main() {
   log(`registered as "${name}" in ${configPath}`);
   log("restart Claude Desktop, then say: Open the MCP config manager");
   log("(Claude Desktop will ask once to allow the app's tools — that prompt is the host's own consent step and can't be pre-approved.)");
+  return 0;
 }
 
+let code = 0;
 try {
-  main();
+  code = main();
 } catch (err) {
-  // Never fail the npm install over this — the manual README path remains.
-  log(`auto-configure skipped: ${err?.message ?? err}`);
+  log(`${HOOK_MODE ? "auto-configure skipped" : "register failed"}: ${err?.message ?? err}`);
+  code = 1;
 }
+// Never fail the npm install over this — the manual README path remains.
+process.exit(HOOK_MODE ? 0 : code);
